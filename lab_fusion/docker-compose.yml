@@ -1,0 +1,62 @@
+# All commands are run from this folder.
+#
+#   docker compose run --rm lab        # full experiment on the GPU  -> outputs/report.html
+#   docker compose run --rm lab-cpu    # same on CPU (slow feature extraction, ~1 h)
+#   docker compose run --rm smoke      # 600 utterances, 2 folds, minutes -> outputs/smoke/report.html
+#   docker compose run --rm lab-tuned  # + hyperparameter search (8 trials per model and fold) -> outputs/tuned/report.html (~1.5 h GPU)
+#   docker compose run --rm test       # ruff + mypy + pytest
+#
+# ./outputs (report) and ./cache (dataset ~1.4 GB, models, extracted features) are mounted from the host,
+# so the download and feature extraction happen once.
+
+name: fusionlab
+
+x-lab: &lab
+  build: .
+  image: fusionlab:latest
+  working_dir: /app
+  volumes:
+    - ./outputs:/app/outputs
+    - ./cache:/app/cache
+
+services:
+  lab:
+    <<: *lab
+    command: python -m fusionlab run --profile standard --out outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  lab-cpu:
+    <<: *lab
+    command: python -m fusionlab run --profile standard --out outputs
+
+  smoke:
+    <<: *lab
+    command: python -m fusionlab run --profile smoke --out outputs/smoke
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  test:
+    <<: *lab
+    command: sh -c "ruff check src tests && mypy && pytest"
+
+  lab-tuned:
+    <<: *lab
+    command: python -m fusionlab run --profile tuned --out outputs/tuned
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

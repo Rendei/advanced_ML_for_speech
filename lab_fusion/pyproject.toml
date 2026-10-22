@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fusionlab"
+version = "2.0.0"
+description = "Audio + text fusion (cross-attention) on IEMOCAP with frozen pretrained encoders; runtime-generated report"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fusionlab = ["py.typed", "*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["fusionlab"]
+strict = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003", "B905"]  # Cyrillic strings are intentional

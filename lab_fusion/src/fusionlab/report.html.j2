@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Фузирование аудио и текста — IEMOCAP</title>
+<style>
+  :root { --ink:#0b0b0b; --muted:#52514e; --line:#e6e5e1; --bg:#fcfcfb; --acc:#1baf7a; --card:#f4f3ef; }
+  body { font:16px/1.55 -apple-system,"Segoe UI",Roboto,"DejaVu Sans",sans-serif; color:var(--ink); background:var(--bg);
+         max-width:1000px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin-bottom:.2em; } h2 { margin-top:2.2em; border-bottom:1px solid var(--line); padding-bottom:.2em; }
+  h3 { margin-top:1.6em; } .meta { color:var(--muted); font-size:.9rem; }
+  table { border-collapse:collapse; width:100%; margin:1em 0; font-size:.93rem; }
+  th,td { border-bottom:1px solid var(--line); padding:6px 10px; text-align:left; } th { background:var(--card); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.best td { font-weight:600; } tr.fusion td:first-child { border-left:3px solid var(--acc); }
+  img { max-width:100%; height:auto; } figure { margin:1.2em 0; } figcaption { color:var(--muted); font-size:.88rem; }
+  .card { background:var(--card); padding:12px 16px; border-radius:8px; margin:1em 0; }
+  .good { border-left:4px solid var(--acc); } .warn { border-left:4px solid #eda100; }
+  code { background:var(--card); padding:1px 5px; border-radius:4px; font-size:.9em; }
+  .cols { display:flex; gap:16px; flex-wrap:wrap; } .cols > * { flex:1 1 300px; }
+</style>
+</head>
+<body>
+<h1>Фузирование аудио и текста для распознавания эмоций</h1>
+<p class="meta">Лабораторная 1 · «Продвинутое МО для обработки речи» · отчёт сформирован в рантайме: {{ now }} ·
+  {{ env }} · время эксперимента {{ "%.1f"|format(minutes) }} мин</p>
+
+<h2>1. Постановка</h2>
+<p>Цель — показать, что <b>фузирование двух модальностей</b> (речь и её транскрипт) даёт прирост по сравнению с лучшей
+  унимодальной моделью, и проверить, что прирост не случаен. Фузирование делается через <b>cross-attention</b>: запросы
+  (Q) — текстовые токены, ключи и значения (K, V) — аудио-кадры; поэтому каждое слово «слушает» те фрагменты
+  сигнала, которые к нему относятся. Простые раннее/позднее слияние и конкатенация не являются целью лабораторной;
+  конкатенация присутствует <i>только</i> как точка отсчёта.</p>
+<p>Всё обучение — на <b>реальных данных и готовых моделях</b>: синтетики нет; предобученные энкодеры заморожены, обучаются
+  только небольшие «головы» (фузирование и классификатор), что делает эксперимент быстрым и повторяемым.</p>
+
+<h2>2. Данные: IEMOCAP</h2>
+<p>Корпус эмоциональной речи IEMOCAP (10 актёров, 5 сессий по паре дикторов, диалоги и сценки). Используется зеркало
+  Hugging Face <code>{{ cfg.dataset_repo }}</code>: аудио 16 кГц, транскрипт, эмоция. Берутся стандартные четыре класса;
+  «excited» объединён с «happy». В выборке <b>{{ n }}</b> реплик, ≈{{ "%.1f"|format(hours) }} ч аудио
+  {% if cfg.limit %}(<b>урезанный запуск</b>: равномерная подвыборка из {{ cfg.limit }} реплик для проверки конвейера — числа не показательны){% endif %}.</p>
+<table>
+  <tr><th>Класс</th><th class="num">Реплик</th><th class="num">Доля, %</th></tr>
+  {% for k, ru, c, p in class_rows %}<tr><td>{{ k }} ({{ ru }})</td><td class="num">{{ c }}</td><td class="num">{{ p }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.overview }}" alt="Обзор данных">
+  <figcaption>Рис. 1. Распределение классов по сессиям, длительности реплик и длины транскриптов.</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.examples }}" alt="Спектрограммы">
+  <figcaption>Рис. 2. По одной реплике каждого класса (спектрограмма). Эмоции видны в энергии и частотной структуре, но
+  по картинке их трудно отличить на глаз — отсюда необходимость модели.</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.space }}" alt="PCA признаков">
+  <figcaption>Рис. 3. PCA усреднённых замороженных признаков до обучения какой-либо головы. Классы перекрываются в обеих
+  модальностях, но по-разному — это и есть материал для фузирования.</figcaption></figure>
+
+<h2>3. Модели</h2>
+<ul>
+  <li><b>Аудио-энкодер:</b> <code>{{ cfg.audio_model }}</code> (заморожен): среднее скрытых слоёв [{{ cfg.audio_layers[0] }}, {{ cfg.audio_layers[1] }}),
+      усреднение по {{ cfg.audio_pool }} кадрам → 12.5 Гц; аудио обрезается до {{ cfg.max_audio_seconds|int }} с.</li>
+  <li><b>Текст-энкодер:</b> <code>{{ cfg.text_model }}</code> (заморожен): среднее последних {{ cfg.text_last_layers }} слоёв.</li>
+  <li><b>Головы</b> (обучаются): Linear → +позиционное кодирование → 1 слой Transformer (d = {{ cfg.d_model }}, {{ cfg.n_heads }} головы).</li>
+</ul>
+<figure><img src="data:image/png;base64,{{ figs.arch }}" alt="Схема">
+  <figcaption>Рис. 4. Основной метод: cross-attention с Q = текст, K/V = аудио.</figcaption></figure>
+<table>
+  <tr><th>Метод</th><th>Что делает</th></tr>
+  <tr><td>{{ titles.audio }}</td><td>энкодер → attention pooling → классификатор (до фузирования)</td></tr>
+  <tr><td>{{ titles.text }}</td><td>то же для текста (до фузирования)</td></tr>
+  <tr><td>{{ titles.concat }}</td><td>pooled-векторы обеих модальностей склеиваются; <i>reference</i> — простейший способ</td></tr>
+  <tr><td>{{ titles.cross }}</td><td>{{ cfg.n_cross_layers }} слоя cross-attention: токены текста — запросы, кадры аудио — ключи/значения; затем pooling по токенам</td></tr>
+  <tr><td>{{ titles.bicross }}</td><td>cross-attention в обе стороны (текст←аудио и аудио←текст), pooled-выходы объединяются</td></tr>
+</table>
+<h3>Формы тензоров (один прямой проход модели cross, батч из 8)</h3>
+<table>
+  <tr><th>Узел</th><th>Форма</th></tr>
+  {% for n, s in shapes %}<tr><td><code>{{ n }}</code></td><td><code>{{ s }}</code></td></tr>{% endfor %}
+</table>
+<p class="meta">B — батч, Ta — число аудио-кадров (12.5 Гц), Tt — число токенов, 768 — размерность энкодеров, d = {{ cfg.d_model }}, 4 — классы.</p>
+
+<h2>4. Протокол оценки</h2>
+<p><b>Leave-one-session-out</b>: каждая из {{ n_folds }} сессий по очереди становится тестовой (дикторы в тесте не встречаются в обучении),
+  следующая по номеру — валидационной (выбор эпохи по UA), остальные — обучающие. Каждая конфигурация обучена с
+  {{ cfg.seeds|length }} разными seed'ами ({{ seeds }}). Метрики: <b>UA</b> — unweighted accuracy (средняя полнота по классам, главная, т.к. классы
+  несбалансированы), <b>WA</b> — accuracy, <b>F1</b> — macro-F1; ± — стандартное отклонение по seed'ам. В обучении используются
+  веса классов, AdamW + OneCycle, ранняя остановка по валидации.</p>
+
+<h2>5. Результаты</h2>
+<table>
+  <tr><th>Модель</th><th class="num">UA, %</th><th class="num">WA, %</th><th class="num">macro-F1, %</th><th class="num">параметров (голова, фолд 1)</th></tr>
+  {% for r in table %}<tr class="{{ 'fusion' if r.fusion }} {{ 'best' if r.best }}"><td>{{ r.title }}</td><td class="num">{{ r.ua }}</td>
+    <td class="num">{{ r.wa }}</td><td class="num">{{ r.f1 }}</td><td class="num">{{ r.params }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.main }}" alt="Результаты">
+  <figcaption>Рис. 5. Слева — UA по всем held-out репликам (усы — std по seed'ам). Справа — UA на каждой тестовой сессии.</figcaption></figure>
+
+<div class="card {{ 'good' if main.significant else 'warn' }}">
+  <b>Главный результат.</b> Лучшее фузирование — «{{ main.fusion }}»: UA {{ main.fusion_ua }} %, лучшая унимодальная модель —
+  «{{ main.uni }}»: {{ main.uni_ua }} %. Разница {{ main.diff }} п.п., 95 % bootstrap-интервал [{{ main.lo }}; {{ main.hi }}] —
+  <b>{{ main.verdict }}</b>.
+</div>
+
+<h3>Значимость прироста (парный bootstrap по репликам, {{ cfg.n_bootstrap }} ресэмплов)</h3>
+<table>
+  <tr><th>Сравнение (A − B)</th><th class="num">Δ UA, п.п.</th><th class="num">95 % CI</th><th class="num">P(A не лучше B)</th><th>Вывод</th></tr>
+  {% for d in diffs %}<tr><td>{{ d.a }} − {{ d.b }}</td><td class="num">{{ d.diff }}</td><td class="num">[{{ d.lo }}; {{ d.hi }}]</td>
+    <td class="num">{{ d.p }}</td><td>{{ d.verdict }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.gains }}" alt="Прирост">
+  <figcaption>Рис. 6. Выигрыш фузирования относительно унимодальных моделей и конкатенации; зелёный — интервал целиком выше нуля.</figcaption></figure>
+
+<h3>По тестовым сессиям (UA, %)</h3>
+<table>
+  <tr><th>Модель</th>{% for i in range(n_folds) %}<th class="num">сессия {{ i + 1 }}</th>{% endfor %}</tr>
+  {% for r in fold_rows %}<tr><td>{{ r.title }}</td>{% for v in r.vals %}<td class="num">{{ v }}</td>{% endfor %}</tr>{% endfor %}
+</table>
+
+<h3>Какие классы выигрывают</h3>
+<figure><img src="data:image/png;base64,{{ figs.conf }}" alt="Матрицы ошибок">
+  <figcaption>Рис. 7. Нормированные матрицы ошибок (усреднение вероятностей по seed'ам).</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.perclass }}" alt="Полнота по классам">
+  <figcaption>Рис. 8. Полнота по классам. Текст хорошо различает смысловые классы, аудио — «активацию» (злость/радость против
+  грусти/нейтрального); фузирование должно брать лучшее от обоих.</figcaption></figure>
+
+{% if tuned %}
+<h2>5a. Подбор гиперпараметров</h2>
+<p><b>Протокол (без утечки в тест).</b> Для каждой пары «модель × внешний фолд» обучено {{ cfg.tune_trials }} конфигураций: первая — значения по умолчанию,
+  остальные — случайные из сетки (lr, размер модели d, dropout, weight decay и — только для cross-attention — число cross-слоёв).
+  Каждая конфигурация обучалась один раз (seed {{ cfg.tune_seed }}) на обучающих сессиях и оценивалась по UA на <i>валидационной</i> сессии;
+  выигрывает лучшая. <b>Тестовая сессия при подборе не используется.</b> Затем выбранная конфигурация переобучается с seed'ами {{ seeds }}
+  и оценивается на тесте. Все остальные результаты отчёта (разделы 5–7) получены именно с подобранными гиперпараметрами; ниже — сравнение с
+  настройками по умолчанию на тех же seed'ах и фолдах.</p>
+<table>
+  <tr><th>Модель</th><th class="num">UA, умолч., %</th><th class="num">UA, подобр., %</th><th class="num">Δ, п.п.</th>
+      <th class="num">F1, умолч., %</th><th class="num">F1, подобр., %</th></tr>
+  {% for r in default_vs_tuned %}<tr><td>{{ r.title }}</td><td class="num">{{ r.ua_default }}</td><td class="num">{{ r.ua_tuned }}</td>
+    <td class="num">{{ r.delta }}</td><td class="num">{{ r.f1_default }}</td><td class="num">{{ r.f1_tuned }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.tuning }}" alt="Подбор гиперпараметров">
+  <figcaption>Рис. T1. Валидационный UA всех испытанных конфигураций (серые), значения по умолчанию (контур) и выбранная конфигурация (залитая точка).</figcaption></figure>
+<details><summary>Выбранные гиперпараметры по фолдам</summary>
+<table>
+  <tr><th>Модель</th><th class="num">фолд</th><th class="num">val UA умолч., %</th><th class="num">val UA выбр., %</th><th class="num">lr</th>
+      <th class="num">d</th><th class="num">dropout</th><th class="num">wd</th><th class="num">cross-слоёв</th><th>это умолч.?</th></tr>
+  {% for r in tune_rows %}<tr><td>{{ titles[r.kind] }}</td><td class="num">{{ r.fold }}</td><td class="num">{{ r.val_default }}</td>
+    <td class="num">{{ r.val_best }}</td><td class="num">{{ r.lr }}</td><td class="num">{{ r.d_model }}</td><td class="num">{{ r.dropout }}</td>
+    <td class="num">{{ r.weight_decay }}</td><td class="num">{{ r.layers }}</td><td>{{ r.is_default }}</td></tr>{% endfor %}
+</table></details>
+<p class="meta">Оговорки: валидационный UA одного обучения шумит на ≈1 п.п., поэтому часть «выигрыша» на валидации — отбор по шуму
+  (winner's curse), и на тесте прирост обычно меньше. Случайный поиск по {{ cfg.tune_trials }} точкам не исчерпывает сетку; гиперпараметры
+  подбирались отдельно для каждой модели, поэтому сравнение моделей идёт «лучший против лучшего», а не при общих настройках.</p>
+{% endif %}
+
+<h2>6. Что именно даёт фузирование</h2>
+<h3>Опирается ли модель на обе модальности?</h3>
+<p>Проба: у обученной модели на тесте одну модальность подменяют на случайную другую реплику. Если модель «ленивая» и
+  использует только текст, подмена аудио ничего не изменит.</p>
+<table>
+  <tr><th>Модель</th><th class="num">UA, оба входа</th><th class="num">UA, аудио подменено</th><th class="num">UA, текст подменён</th></tr>
+  {% for r in shuffle %}<tr><td>{{ r.title }}</td><td class="num">{{ r.full }}</td><td class="num">{{ r.audio }}</td><td class="num">{{ r.text }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.reliance }}" alt="Проба"><figcaption>Рис. 9. Падение качества при подмене модальности.</figcaption></figure>
+
+<h3>Взаимодополнительность модальностей</h3>
+<p>Доли реплик: обе модели верны — {{ comp.both_right }} %, верно только аудио — {{ comp.only_audio }} %,
+  верно только текст — {{ comp.only_text }} %, обе ошибаются — {{ comp.both_wrong }} %. «Оракул» (хотя бы одна верна): {{ comp.oracle }} %.
+  Cross-attention исправляет {{ comp.cross_fixes_text }} % ошибок текстовой модели, но ломает {{ comp.cross_breaks_text }} % её верных ответов.</p>
+
+{% if figs.attention %}
+<h3>Карта cross-attention</h3>
+<figure><img src="data:image/png;base64,{{ figs.attention }}" alt="Attention">
+  <figcaption>Рис. 10. Веса последнего cross-attention слоя (среднее по головам) для одной тестовой реплики. Реплика выбрана как
+  иллюстрация: фузирование угадало, текстовая модель — нет. Это <i>пример</i>, а не доказательство выравнивания: по одной картинке
+  нельзя судить о том, что именно выучено; доказательства — таблицы выше.</figcaption></figure>
+{% if att_sim %}
+<p>Среднее косинусное сходство строк внимания разных слов на этом примере: <b>{{ att_sim }}</b> (1.0 — все слова смотрят на одни и те же
+  аудио-кадры, значения около 0 — каждое слово «слушает» свой фрагмент). Чем ближе к 1, тем меньше у модели
+  <i>пословного выравнивания</i> текста и звука: она скорее выбирает «самые выразительные» кадры реплики и использует их как
+  общий акустический контекст для всех токенов.</p>
+{% endif %}
+{% endif %}
+
+{% if examples_rows %}
+<h3>Примеры: текст ошибается, фузирование право</h3>
+<table>
+  <tr><th>Текст реплики</th><th>Истина</th><th>Текст-only</th><th>Аудио-only</th><th>Cross</th></tr>
+  {% for r in examples_rows %}<tr><td>{{ r.text }}</td><td>{{ r.true }}</td><td>{{ r.text_pred }}</td><td>{{ r.audio_pred }}</td><td>{{ r.fusion_pred }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+
+<h3>Обучение</h3>
+<figure><img src="data:image/png;base64,{{ figs.curves }}" alt="Кривые"><figcaption>Рис. 11. Кривые обучения (тестовая сессия 1, seed 0).</figcaption></figure>
+
+<h2>7. Выводы</h2>
+<ul>
+  <li>Лучшая унимодальная модель — «{{ main.uni }}» ({{ main.uni_ua }} % UA); лучшее фузирование — «{{ main.fusion }}» ({{ main.fusion_ua }} % UA),
+      разница {{ main.diff }} п.п. [{{ main.lo }}; {{ main.hi }}] — {{ main.verdict }}.</li>
+  <li>Доля реплик, где модальности исправляют друг друга (только аудио верно + только текст верно): {{ "%.1f"|format(comp.only_audio|float + comp.only_text|float) }} % — это потолок выигрыша от комбинирования.</li>
+  <li>Модель cross-attention (Q=текст, K/V=аудио) использует обе модальности: UA {{ shuf_cross.full }} % падает до {{ shuf_cross.audio }} %
+      при подмене аудио и до {{ shuf_cross.text }} % при подмене текста.</li>
+  <li>Cross-attention против простой конкатенации: Δ UA {{ cross_vs_concat.diff }} п.п. [{{ cross_vs_concat.lo }}; {{ cross_vs_concat.hi }}] —
+      {{ cross_vs_concat.verdict }}.
+      {% if not cross_vs_concat.better %}В этой постановке (замороженные энкодеры, ≈{{ n }} реплик, {{ cfg.n_cross_layers }} слоя
+      внимания над уже контекстуализированными признаками) преимущество cross-attention над склейкой <b>не подтвердилось</b>
+      ({{ 'он уступает ей' if cross_vs_concat.verdict == 'значимо хуже' else 'различие в пределах шума' }}): прирост даёт сам факт
+      объединения модальностей, а не конкретный механизм объединения.{% endif %}</li>
+</ul>
+<p class="meta">Ограничения: энкодеры заморожены (дообучение WavLM/RoBERTa дало бы больше, но потребовало бы GPU-часов);
+  IEMOCAP — актёрская речь по сценарию, перенос на спонтанную речь не проверялся; 4 класса — это упрощение исходной разметки;
+  числа зависят от seed'ов — поэтому приведены ± и bootstrap-интервалы. Датасет распространяется на условиях исследовательской лицензии IEMOCAP (USC SAIL).</p>
+
+<h2>8. Воспроизводимость</h2>
+<p>Конфигурация этого запуска: <code>{{ cfg }}</code></p>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# generated at run time (see README); only the finished tuned report is versioned
+outputs/*
+!outputs/tuned/
+outputs/tuned/results.pkl
+*.pkl
+cache/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
