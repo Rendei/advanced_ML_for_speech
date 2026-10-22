@@ -40,13 +40,12 @@ def _pad(flat: npt.NDArray[np.float16], lens: npt.NDArray[np.int64]) -> tuple[Te
 
 
 class Dataset:
-    """The whole corpus as padded fp16 tensors; ``take`` slices a subset without copying features twice."""
+    """The whole corpus as padded fp16 tensors; ``batch(idx)`` gathers any subset of utterances as a ``Batch``."""
 
     def __init__(self, feats: Features) -> None:
         self.audio, self.audio_mask = _pad(feats.audio_flat, feats.audio_len)
         self.text, self.text_mask = _pad(feats.text_flat, feats.text_len)
         self.y = torch.from_numpy(feats.meta.label)
-        self.session = feats.meta.session
 
     def __len__(self) -> int:
         return int(self.y.shape[0])
