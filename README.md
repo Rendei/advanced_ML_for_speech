@@ -4,4 +4,3 @@
 |---|---|---|
 | Лаба 1. Фузирование аудио + текст (IEMOCAP, WavLM + RoBERTa, cross-attention), отчёт формируется в рантайме | [`lab_fusion/`](lab_fusion/README.md) | `cd lab_fusion && docker compose run --rm lab` |
 
-`_archive/lab_fusion_synthetic/` — прежняя версия лабы на синтетических данных (не используется).
