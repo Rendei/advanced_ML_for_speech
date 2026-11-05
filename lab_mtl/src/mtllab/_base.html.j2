@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{% endblock %}</title>
+<style>
+  :root { --ink:#0b0b0b; --muted:#52514e; --line:#e6e5e1; --bg:#fcfcfb; --acc:#1baf7a; --card:#f4f3ef; }
+  body { font:16px/1.55 -apple-system,"Segoe UI",Roboto,"DejaVu Sans",sans-serif; color:var(--ink); background:var(--bg);
+         max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin-bottom:.2em; } h2 { margin-top:2.2em; border-bottom:1px solid var(--line); padding-bottom:.2em; }
+  h3 { margin-top:1.6em; } .meta { color:var(--muted); font-size:.9rem; }
+  table { border-collapse:collapse; width:100%; margin:1em 0; font-size:.92rem; }
+  th,td { border-bottom:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; } th { background:var(--card); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.best td { font-weight:600; } tr.base td { color:var(--muted); }
+  img { max-width:100%; height:auto; } figure { margin:1.2em 0; } figcaption { color:var(--muted); font-size:.88rem; }
+  .card { background:var(--card); padding:12px 16px; border-radius:8px; margin:1em 0; }
+  .good { border-left:4px solid var(--acc); } .warn { border-left:4px solid #eda100; }
+  code { background:var(--card); padding:1px 5px; border-radius:4px; font-size:.9em; }
+  pre { background:var(--card); padding:10px 14px; border-radius:8px; overflow-x:auto; font-size:.85rem; }
+</style>
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>

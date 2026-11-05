@@ -1,0 +1,13 @@
+# generated at run time (see README); only the finished reports are versioned
+outputs/*
+!outputs/report.html
+!outputs/eda.html
+!outputs/metrics.json
+!outputs/figures/
+*.pkl
+cache/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

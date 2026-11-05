@@ -1,0 +1,50 @@
+# All commands are run from this folder. Everything (data download, models, training, report) happens in the container.
+#
+#   docker compose run --rm eda        # EDA only, CPU, ~1 min once the data is cached  -> outputs/eda.html
+#   docker compose run --rm smoke      # 600 utterances, 2 folds, minutes               -> outputs/smoke/report.html
+#   docker compose run --rm lab        # the full experiment on the GPU                 -> outputs/report.html
+#   docker compose run --rm lab-cpu    # the same on CPU (slow)
+#   docker compose run --rm test       # ruff + mypy --strict + pytest
+#
+# ./outputs (reports) and ./cache (dataset ~1.4 GB, models ~1 GB, extracted features) are mounted from the host,
+# so the download and the feature extraction happen only once. The first run needs internet access (Hugging Face).
+
+name: mtllab
+
+x-lab: &lab
+  build: .
+  image: mtllab:latest
+  working_dir: /app
+  volumes:
+    - ./outputs:/app/outputs
+    - ./cache:/app/cache
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  eda:
+    <<: *lab
+    command: python -m mtllab eda --profile standard --out outputs
+
+  lab:
+    <<: [*lab, *gpu]
+    command: python -m mtllab run --profile standard --out outputs
+
+  lab-cpu:
+    <<: *lab
+    command: python -m mtllab run --profile standard --out outputs
+
+  smoke:
+    <<: [*lab, *gpu]
+    command: python -m mtllab run --profile smoke --out outputs/smoke
+
+  test:
+    <<: *lab
+    command: sh -c "ruff check src tests && mypy && pytest"

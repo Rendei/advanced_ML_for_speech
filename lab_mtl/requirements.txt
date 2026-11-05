@@ -1,0 +1,9 @@
+# PyTorch is installed separately in the Dockerfile (CUDA 12.8 wheels by default, see TORCH_INDEX_URL).
+numpy>=2.0
+scipy>=1.13
+matplotlib>=3.9
+Jinja2>=3.1
+pyarrow>=16
+soundfile>=0.12
+transformers>=4.46
+huggingface_hub>=0.25

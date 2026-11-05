@@ -16,7 +16,9 @@ import soundfile as sf
 from .config import RAW_TO_CLASS, Config
 
 SAMPLE_RATE = 16_000
-_UTT_RE = re.compile(r"Ses(?P<session>\d\d)(?P<gender>[MF])_")
+# Session comes from the prefix; the speaker's gender is the letter of the utterance suffix (..._F000 / ..._M000),
+# NOT the letter right after the session number (that one marks the dialogue, not the speaker).
+_UTT_RE = re.compile(r"Ses(?P<session>\d\d)[MF]_.*_(?P<gender>[MF])\d{3}$")
 
 
 @dataclass(frozen=True)

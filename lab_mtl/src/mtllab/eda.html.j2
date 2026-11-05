@@ -1,0 +1,8 @@
+{% extends "_base.html.j2" %}
+{% block title %}EDA — IEMOCAP, цели MTL{% endblock %}
+{% block body %}
+<h1>EDA: данные для многозадачного обучения</h1>
+<p class="meta">Лабораторная 2 · «Продвинутое МО для обработки речи» · отчёт сформирован в рантайме: {{ now }} · {{ env }}</p>
+<h2>Данные</h2>
+{% include "_eda_section.html.j2" %}
+{% endblock %}

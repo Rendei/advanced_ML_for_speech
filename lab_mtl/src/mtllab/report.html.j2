@@ -1,0 +1,166 @@
+{% extends "_base.html.j2" %}
+{% block title %}Многозадачное обучение (MTL) — IEMOCAP{% endblock %}
+{% block body %}
+<h1>Многозадачное обучение (MTL): эмоции, valence / arousal / dominance и пол диктора</h1>
+<p class="meta">Лабораторная 2 · «Продвинутое МО для обработки речи» · отчёт сформирован в рантайме: {{ now }} · {{ env }} ·
+  время эксперимента {{ "%.1f"|format(minutes) }} мин</p>
+
+<h2>1. Постановка</h2>
+<p><b>Многозадачное обучение (multi-task learning, MTL)</b> — одна модель с общей частью (<i>транком</i>) и несколькими «головами» учится решать
+  сразу несколько задач. Общий транк получает градиенты от всех задач: если задачи связаны, они дают друг другу дополнительный сигнал и
+  регуляризуют друг друга; если нет — могут мешать (<i>негативный перенос</i>).</p>
+<p>Основная задача — <b>распознавание эмоции</b> по речи и её транскрипту (4 класса). Вспомогательные задачи:
+  три <b>связанные</b> с эмоцией — оценки {{ vad_names|join(", ") }} (регрессия), и одна <b>несвязанная</b> — пол диктора (классификация).
+  Вопросы лабораторной:</p>
+<ol>
+  <li>Улучшает ли совместное обучение качество основной задачи по сравнению с моделью, обученной только на эмоциях (single-task)?</li>
+  <li>Какие вспомогательные задачи помогают, а какие нет (связанные против несвязанной)?</li>
+  <li>Как лучше складывать потери разных задач: равные веса (и какой вес вспомогательных), uncertainty weighting, PCGrad?</li>
+  <li>Выигрывают ли от совместного обучения сами вспомогательные задачи?</li>
+  <li>Конфликтуют ли задачи в общем транке (разные направления градиентов)?</li>
+</ol>
+<p>Данные и модели — готовые: корпус IEMOCAP, замороженные WavLM-base+ (аудио) и RoBERTa-base (текст); обучаются только транк-слои
+  фузирования (cross-attention из лабораторной 1) и головы задач.</p>
+
+<h2>2. Данные и EDA</h2>
+{% include "_eda_section.html.j2" %}
+
+<h2>3. Задачи и метрики</h2>
+<table>
+  <tr><th>Задача</th><th>Тип</th><th>Выход головы</th><th>Потеря</th><th>Метрика</th></tr>
+  <tr><td>эмоция</td><td>классификация, 4 класса</td><td>[B, 4]</td><td>cross-entropy, веса классов, label smoothing 0.05</td><td><b>UA</b> (средняя полнота по классам), WA, macro-F1</td></tr>
+  <tr><td>valence, arousal, dominance</td><td>регрессия, шкала 1–5</td><td>[B, 1] на каждую</td><td>MSE по z-оценкам (среднее и σ — по обучающей выборке)</td><td><b>CCC</b> (Lin’s concordance), корреляция, MAE</td></tr>
+  <tr><td>пол диктора</td><td>классификация, 2 класса</td><td>[B, 2]</td><td>cross-entropy</td><td>UA</td></tr>
+</table>
+<p><b>CCC</b> = 2·cov(y, ŷ) / (σ²<sub>y</sub> + σ²<sub>ŷ</sub> + (μ<sub>y</sub> − μ<sub>ŷ</sub>)²): штрафует и за слабую корреляцию, и за сдвиг/масштаб; 1 — идеально, 0 — предсказания
+  не связаны с истиной. Метрики считаются на <b>исходной шкале</b> оценок (после обратного преобразования z-оценок).</p>
+
+<h2>4. Модель</h2>
+<figure><img src="data:image/png;base64,{{ figs.arch }}" alt="Архитектура">
+  <figcaption>Рис. 6. Жёсткое разделение параметров (hard parameter sharing): общий транк-фузирование и по небольшой голове на задачу.</figcaption></figure>
+<ul>
+  <li><b>Энкодеры (заморожены):</b> <code>{{ cfg.audio_model }}</code> (среднее слоёв {{ cfg.audio_layers[0] }}–{{ cfg.audio_layers[1] - 1 }}, 12.5 Гц),
+      <code>{{ cfg.text_model }}</code> (среднее последних {{ cfg.text_last_layers }} слоёв).</li>
+  <li><b>Общий транк:</b> по слою Transformer на модальность и фузирование «{{ cfg.trunk }}» (cross-attention Q=текст ↔ K/V=аудио, {{ cfg.n_cross_layers }} слоя, d = {{ cfg.d_model }});
+      на выходе вектор <code>z</code> с LayerNorm.</li>
+  <li><b>Головы:</b> Dropout → Linear → GELU → Linear ({{ cfg.head_hidden }} → выход) — отдельные для каждой задачи.</li>
+  <li><b>Single-task</b> модель — та же сеть с единственной головой: сравнение «одна задача против нескольких» честное по архитектуре.</li>
+</ul>
+<h3>Формы тензоров (один прямой проход, батч из 8, модель «MTL, равные веса»)</h3>
+<table>
+  <tr><th>Узел</th><th>Форма</th></tr>
+  {% for n, s in shapes %}<tr><td><code>{{ n }}</code></td><td><code>{{ s }}</code></td></tr>{% endfor %}
+</table>
+<p class="meta">B — батч, Ta — число аудио-кадров (12.5 Гц), Tt — число токенов, 768 — размерность энкодеров, d = {{ cfg.d_model }}.</p>
+
+<h2>5. Как складываются потери</h2>
+<p>Для задач <i>t</i> с потерями L<sub>t</sub> общий шаг — это один из трёх способов:</p>
+<table>
+  <tr><th>Стратегия</th><th>Что делает</th></tr>
+  <tr><td><b>Равные веса</b></td><td>L = L<sub>эмоция</sub> + w · Σ L<sub>вспомогательные</sub>. Вес w вспомогательных задач — гиперпараметр; проверены w = 0.1, 0.3, 1.</td></tr>
+  <tr><td><b>Uncertainty weighting</b><br>(Kendall et al., 2018)</td><td>L = Σ<sub>t</sub> ( ½·e<sup>−s<sub>t</sub></sup>·L<sub>t</sub> + ½·s<sub>t</sub> ), где s<sub>t</sub> = log σ²<sub>t</sub> — обучаемый параметр задачи. «Шумная» задача (большая σ) получает малый вес; член ½·s<sub>t</sub> не даёт σ расти бесконечно.</td></tr>
+  <tr><td><b>PCGrad</b><br>(Yu et al., 2020)</td><td>Считаются градиенты g<sub>t</sub> каждой задачи по общему транку. Если g<sub>i</sub>·g<sub>j</sub> &lt; 0 (задачи тянут в разные стороны), у g<sub>i</sub> убирается составляющая вдоль g<sub>j</sub>:
+      g<sub>i</sub> ← g<sub>i</sub> − (g<sub>i</sub>·g<sub>j</sub>/‖g<sub>j</sub>‖²)·g<sub>j</sub>; затем градиенты суммируются. Головы получают только градиент своей задачи.</td></tr>
+</table>
+
+<h2>6. Протокол</h2>
+<p><b>Leave-one-session-out</b>: каждая из {{ cfg.n_folds }} сессий по очереди — тестовая (дикторы в тесте не встречаются в обучении), следующая по номеру — валидационная,
+  остальные — обучающие. Эпоха выбирается по валидации: для моделей с эмоцией — по UA эмоции, для single-task вспомогательных — по метрике своей задачи.
+  Каждый режим обучен с {{ cfg.seeds|length }} seed'ами ({{ seeds }}); режимов — {{ n_regimes }}. Гиперпараметры у всех режимов одинаковые (взяты из лабораторной 1, не подбирались).</p>
+<p><b>Статистика:</b> разница между режимами оценивается <b>парным bootstrap по диалогам</b> ({{ cfg.n_bootstrap }} ресэмплов): реплики одного диалога сильно
+  скоррелированы, поэтому пересэмплируются целые диалоги, а не отдельные реплики. Показан 95 % интервал; «значимо» — интервал не содержит 0.
+  Метрики по seed'ам усредняются внутри каждого ресэмпла.</p>
+
+<h2>7. Результаты</h2>
+<h3>7.1 Эмоции: single-task против MTL</h3>
+<table>
+  <tr><th>Режим обучения</th><th class="num">UA, %</th><th class="num">WA, %</th><th class="num">macro-F1, %</th><th class="num">Δ UA, п.п.</th><th class="num">95 % интервал</th><th>вывод</th><th class="num">параметров</th></tr>
+  {% for r in emotion_rows %}<tr class="{{ 'base' if r.base }}"><td>{{ r.title }}</td><td class="num">{{ r.ua }}</td><td class="num">{{ r.wa }}</td><td class="num">{{ r.f1 }}</td>
+    <td class="num">{{ r.delta }}</td><td class="num">{{ r.ci }}</td><td>{{ r.verdict }}</td><td class="num">{{ r.params }}</td></tr>{% endfor %}
+</table>
+<p class="meta">Δ — разница с single-task моделью эмоций ({{ baseline_ua }} % UA). Число параметров — для фолда 1.</p>
+<figure><img src="data:image/png;base64,{{ figs.emotion }}" alt="UA по режимам">
+  <figcaption>Рис. 7. UA эмоций по режимам (усы — std по seed'ам).</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.gains }}" alt="Выигрыш">
+  <figcaption>Рис. 8. Разница с single-task: зелёный — значимо лучше, красный — значимо хуже, серый — различие в пределах шума.</figcaption></figure>
+
+{% if best %}
+<div class="card {{ 'good' if best_significant else 'warn' }}">
+  <b>Главный результат.</b> Лучший MTL-режим по эмоциям — «{{ best_regime }}»: Δ UA {{ best.diff }} п.п. относительно single-task,
+  95 % интервал [{{ best.lo }}; {{ best.hi }}] — <b>{{ best.verdict }}</b>.
+  {% if not best_significant %}Значимого выигрыша от многозадачности для основной задачи в этой постановке не обнаружено.{% endif %}
+</div>
+{% endif %}
+
+<h3>7.2 Стратегии балансировки против равных весов</h3>
+<table>
+  <tr><th>Сравнение (эмоции)</th><th class="num">Δ UA, п.п.</th><th class="num">95 % интервал</th><th>вывод</th></tr>
+  {% for d in extra_rows %}<tr><td>{{ d.a }} − {{ d.b }}</td><td class="num">{{ d.diff }}</td><td class="num">[{{ d.lo }}; {{ d.hi }}]</td><td>{{ d.verdict }}</td></tr>{% endfor %}
+</table>
+
+<h3>7.3 Вспомогательные задачи: помогает ли им совместное обучение?</h3>
+<p class="meta"><b>Как читать.</b> В MTL-режимах эпоха выбирается по UA <i>эмоций</i> (основная задача), а у single-task модели вспомогательной задачи — по метрике
+  <i>самой этой задачи</i>. Поэтому для вспомогательных задач сравнение консервативно: single-task модель выбрана «под себя», MTL — под эмоции.</p>
+<table>
+  <tr><th>Задача</th><th>метрика</th><th class="num">single-task</th>
+      <th class="num">MTL, равные веса (Δ)</th><th class="num">MTL, uncertainty (Δ)</th><th class="num">MTL, PCGrad (Δ)</th></tr>
+  {% for r in aux_rows %}<tr><td>{{ r.task }}</td><td>{{ r.metric }}</td><td class="num">{{ r.single }}</td>
+    {% for key in ["mtl_equal", "mtl_uncertainty", "mtl_pcgrad"] %}<td class="num">{{ r[key][0] }}<br><span class="meta">Δ {{ r[key][1] }}, {{ r[key][2] }}</span></td>{% endfor %}</tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.aux }}" alt="Вспомогательные задачи"><figcaption>Рис. 9. Качество вспомогательных задач: single-task против MTL.</figcaption></figure>
+{% if figs.aux_gains %}<figure><img src="data:image/png;base64,{{ figs.aux_gains }}" alt="Выигрыш aux"><figcaption>Рис. 10. Разницы MTL − single-task для вспомогательных задач (CCC; для пола — UA в долях).</figcaption></figure>{% endif %}
+{% if gender_acc %}<p class="meta">Контроль меток: single-task модель определяет пол диктора с UA {{ gender_acc }} % — метка пола (из суффикса идентификатора) согласуется со звуком.</p>{% endif %}
+
+<h2>8. Анализ</h2>
+<h3>8.1 Какие вспомогательные задачи помогают эмоциям</h3>
+<ul>
+  {% if vad_gain_row %}<li>Эмоция + valence/arousal/dominance (связанные задачи): Δ UA {{ vad_gain_row.diff }} п.п. [{{ vad_gain_row.lo }}; {{ vad_gain_row.hi }}] — {{ vad_gain_row.verdict }}.</li>{% endif %}
+  {% if gender_gain_row %}<li>Эмоция + пол диктора (несвязанная задача): Δ UA {{ gender_gain_row.diff }} п.п. [{{ gender_gain_row.lo }}; {{ gender_gain_row.hi }}] — {{ gender_gain_row.verdict }}.</li>{% endif %}
+</ul>
+
+<h3>8.2 Вес вспомогательных потерь</h3>
+<table>
+  <tr><th class="num">Вес вспомогательных потерь</th><th class="num">UA эмоций, %</th></tr>
+  {% for s in sweep %}<tr><td class="num">{{ s.w }}</td><td class="num">{{ s.ua }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.sweep }}" alt="Вес aux"><figcaption>Рис. 11. UA эмоций при разных весах вспомогательных задач (полоса — single-task baseline ± std).</figcaption></figure>
+
+{% if figs.unc %}
+<h3>8.3 Веса, выученные uncertainty weighting</h3>
+<figure><img src="data:image/png;base64,{{ figs.unc }}" alt="Веса задач"><figcaption>Рис. 12. Эффективные веса задач exp(−s)/2 по эпохам. Конечные веса: {% for k, v in unc_final.items() %}{{ k }} — {{ v }}{{ "; " if not loop.last }}{% endfor %}.</figcaption></figure>
+{% endif %}
+
+{% if figs.cos %}
+<h3>8.4 Конфликтуют ли задачи в общем транке</h3>
+<p>На фиксированном батче обучающих реплик (без dropout, без обновления весов) каждую эпоху считается градиент каждой задачи по параметрам транка
+  и косинус между ними. Отрицательный косинус — задачи тянут общие веса в разные стороны.</p>
+<figure><img src="data:image/png;base64,{{ figs.cos }}" alt="Косинусы градиентов"><figcaption>Рис. 13. Средний по эпохам косинус градиентов пар задач.</figcaption></figure>
+<table>
+  <tr><th>Пара задач</th>{% for t in cos_regimes %}<th class="num">{{ t }}</th>{% endfor %}</tr>
+  {% for r in pair_rows %}<tr><td>{{ r.pair }}</td>{% for c in r.cells %}<td class="num">{{ c }}</td>{% endfor %}</tr>{% endfor %}
+  <tr><td><b>доля пар с отрицательным косинусом, %</b></td>{% for t in cos_regimes %}<td class="num">{{ shares[t] }}</td>{% endfor %}</tr>
+</table>
+{% endif %}
+
+<h3>8.5 Предсказание шкал VAD и полнота по классам</h3>
+{% if figs.vadscatter %}<figure><img src="data:image/png;base64,{{ figs.vadscatter }}" alt="VAD: истина и предсказание"><figcaption>Рис. 14. Истинные и предсказанные оценки (режим «MTL, равные веса», усреднение по seed'ам).</figcaption></figure>{% endif %}
+<figure><img src="data:image/png;base64,{{ figs.recall }}" alt="Полнота по классам"><figcaption>Рис. 15. Полнота по классам эмоций.</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.curves }}" alt="Кривые обучения"><figcaption>Рис. 16. Кривые обучения (тестовая сессия 1, seed 0).</figcaption></figure>
+
+<h2>9. Выводы</h2>
+<ul>
+  {% if best %}<li><b>Основная задача.</b> Лучший MTL-режим «{{ best_regime }}» отличается от single-task на {{ best.diff }} п.п. UA [{{ best.lo }}; {{ best.hi }}] — {{ best.verdict }}.</li>{% endif %}
+  {% if vad_gain_row and gender_gain_row %}<li><b>Связанные и несвязанные задачи.</b> Добавление VAD: {{ vad_gain_row.diff }} п.п. ({{ vad_gain_row.verdict }}); добавление пола: {{ gender_gain_row.diff }} п.п. ({{ gender_gain_row.verdict }}).</li>{% endif %}
+  {% for d in extra_rows %}<li><b>{{ d.a }}</b> относительно равных весов: {{ d.diff }} п.п. [{{ d.lo }}; {{ d.hi }}] — {{ d.verdict }}.</li>{% endfor %}
+  {% if shares %}<li><b>Конфликты градиентов.</b> Доля пар задач с отрицательным косинусом в транке (средняя по эпохам):
+      {% for t, s in shares.items() %}{{ t }} — {{ s }} %{{ "; " if not loop.last }}{% endfor %}.</li>{% endif %}
+</ul>
+<p class="meta"><b>Ограничения.</b> Энкодеры заморожены (дообучение WavLM/RoBERTa могло бы изменить картину); гиперпараметры общие для всех режимов и не подбирались,
+  поэтому «MTL не помогло» означает «не помогло при этих настройках»; оценки valence/arousal/dominance — усреднённые оценки небольшого числа разметчиков;
+  интервалы bootstrap учитывают случайность выбора диалогов и seed'ов, но не выбор самой выборки дикторов (5 сессий); один корпус актёрской речи;
+  числа зависят от seed'ов, поэтому приведены ± и интервалы. Датасет распространяется на условиях исследовательской лицензии IEMOCAP (USC SAIL).</p>
+
+<h2>10. Воспроизводимость</h2>
+<p>Всё выполняется внутри контейнера (данные и модели скачиваются при первом запуске). Конфигурация этого запуска:</p>
+<pre>{{ cfg }}</pre>
+{% endblock %}
