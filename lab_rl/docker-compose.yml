@@ -1,0 +1,66 @@
+# All commands are run from this folder. Everything (solver build, opening-book download, training, report) happens
+# in the container.
+#
+#   docker compose run --rm eda        # game analysis only, CPU, ~2 min                  -> outputs/eda.html
+#   docker compose run --rm smoke      # tiny end-to-end run, minutes                     -> outputs/smoke/report.html
+#   docker compose run --rm lab        # the full experiment on the GPU                   -> outputs/report.html
+#   docker compose run --rm lab-cpu    # the same on CPU (slower)
+#   docker compose up play-web         # play in the browser: http://localhost:8000 (trained weights/ are versioned)
+#   docker compose run --rm play       # play in the terminal (weights/ are shipped)
+#   docker compose run --rm test       # ruff + mypy --strict + pytest
+#
+# ./outputs (reports, checkpoints) and ./cache (opening book 32 MB, solver answers) are mounted from the host.
+# The first run needs internet access (GitHub: solver sources at image build, opening book at first run).
+
+name: c4rl
+
+x-lab: &lab
+  build: .
+  image: c4rl:latest
+  working_dir: /app
+  volumes:
+    - ./outputs:/app/outputs
+    - ./cache:/app/cache
+    - ./weights:/app/weights
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  eda:
+    <<: *lab
+    command: python -m c4rl eda --profile standard --out outputs
+
+  lab:
+    <<: [*lab, *gpu]
+    command: python -m c4rl run --profile standard --out outputs
+
+  lab-cpu:
+    <<: *lab
+    command: python -m c4rl run --profile standard --out outputs
+
+  smoke:
+    <<: [*lab, *gpu]
+    command: python -m c4rl run --profile smoke --out outputs/smoke
+
+  play-web:
+    <<: *lab
+    ports:
+      - "8000:8000"
+    command: python -m c4rl serve --host 0.0.0.0 --port 8000
+
+  play:
+    <<: *lab
+    stdin_open: true
+    tty: true
+    command: python -m c4rl play --out outputs
+
+  test:
+    <<: *lab
+    command: sh -c "ruff check src tests && mypy && pytest"

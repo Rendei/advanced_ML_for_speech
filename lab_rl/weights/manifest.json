@@ -1,0 +1,44 @@
+[
+  {
+    "id": "az_init",
+    "file": "az_init.pt",
+    "label": "AlphaZero-lite: необученная (0%)",
+    "elo": 70,
+    "elo_search": null
+  },
+  {
+    "id": "az_p25",
+    "file": "az_p25.pt",
+    "label": "AlphaZero-lite: 25% обучения",
+    "elo": 604,
+    "elo_search": null
+  },
+  {
+    "id": "az_p50",
+    "file": "az_p50.pt",
+    "label": "AlphaZero-lite: 50% обучения",
+    "elo": 758,
+    "elo_search": null
+  },
+  {
+    "id": "az_final",
+    "file": "az_final.pt",
+    "label": "AlphaZero-lite: финальная",
+    "elo": 788,
+    "elo_search": 944
+  },
+  {
+    "id": "az_lite_final",
+    "file": "az_lite_final.pt",
+    "label": "AlphaZero-lite: слабый поиск в self-play",
+    "elo": 721,
+    "elo_search": 926
+  },
+  {
+    "id": "dqn_final",
+    "file": "dqn_final.pt",
+    "label": "DQN: финальная",
+    "elo": 748,
+    "elo_search": null
+  }
+]

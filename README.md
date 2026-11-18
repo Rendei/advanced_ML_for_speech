@@ -4,6 +4,7 @@
 |---|---|---|
 | Лаба 1. Фузирование аудио + текст (IEMOCAP, WavLM + RoBERTa, cross-attention), отчёт формируется в рантайме | [`lab_fusion/`](lab_fusion/README.md) | `cd lab_fusion && docker compose run --rm lab` |
 | Лаба 2. Многозадачное обучение (MTL): эмоции + valence/arousal/dominance + пол диктора, балансировка потерь, EDA | [`lab_mtl/`](lab_mtl/README.md) | `cd lab_mtl && docker compose run --rm lab` |
+| Лаба 3. RL: Connect-4, AlphaZero-lite (свой батчевый MCTS) против DQN, оценка по идеальному солверу, Elo | [`lab_rl/`](lab_rl/README.md) | `cd lab_rl && docker compose run --rm lab` |
 
 Каждая лаба самодостаточна: свой Dockerfile, данные и модели скачиваются внутри контейнера, отчёт (HTML) строится в рантайме.
 

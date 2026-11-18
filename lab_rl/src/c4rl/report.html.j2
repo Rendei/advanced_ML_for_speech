@@ -1,0 +1,183 @@
+{% extends "_base.html.j2" %}
+{% block title %}Connect-4 + RL: AlphaZero-lite против DQN{% endblock %}
+{% block body %}
+<h1>Лаба 3 (RL): Connect-4 — AlphaZero-lite против DQN, оценка по идеальному солверу</h1>
+<p class="meta">«Продвинутое МО для обработки речи» · отчёт сформирован в рантайме: {{ now }} · {{ env }} · профиль <code>{{ cfg.profile }}</code>
+  · seed {{ seed }} · весь запуск занял {{ "%.0f"|format(minutes) }} мин</p>
+{% if cfg.profile == "smoke" %}<div class="card warn"><b>Это smoke-запуск</b> (крошечные сети и десятки партий) — он проверяет работоспособность
+  конвейера, числа и выводы ниже не показательны.</div>{% endif %}
+
+<h2>1. Задача</h2>
+<p>Научить агента играть в Connect-4 (7 × 6) <b>только из самоигры</b>, без человеческих партий и без заложенных знаний о стратегии,
+  и честно измерить, насколько он близок к идеальной игре. Формально это марковская игра двух лиц с нулевой суммой: состояние — позиция,
+  действие — колонка (1–7, только незаполненные), награда +1/0/−1 выдаётся только в конце партии. Две постановки сравниваются на одном бюджете партий:</p>
+<ul>
+  <li><b>Value-based: DQN</b> (негамакс-версия, double DQN). Сеть учится оценивать Q(s, a), цель обновления — отрицательная оценка лучшего
+    ответа соперника; обе стороны ходят одной сетью (self-play), эксплорация — ε-greedy.</li>
+  <li><b>Policy + search: AlphaZero-lite.</b> Сеть выдаёт политику p(a|s) и оценку позиции v(s); поиск <b>MCTS</b> (PUCT) улучшает
+    политику, и сеть учится воспроизводить результат поиска (π) и исход партии (z). Поиск написан с нуля и <b>векторизован</b>:
+    256 деревьев хранятся в плотных массивах numpy, все партии делают симуляцию одновременно, листья оценивает один вызов сети.</li>
+</ul>
+<p>Условие на новизну: в отличие от табличного Q-learning в сеточных средах («дойти из A в B, не упав в дырки»), здесь пространство состояний
+  не помещается в таблицу, соперник — это сам обучающийся агент (нестационарная среда), а награда отложена на десятки ходов.</p>
+
+<h2>2. Данные: изучение игры (EDA)</h2>
+{% include "_eda_section.html.j2" %}
+
+<h2>3. Методы и эксперимент</h2>
+<figure><img src="data:image/png;base64,{{ figs.pipeline }}" alt="Цикл AlphaZero-lite">
+  <figcaption>Рис. 5. Цикл AlphaZero-lite.</figcaption></figure>
+<p><b>Сеть.</b> Общий остов — свёрточная ResNet ({{ net.blocks }} остаточных блоков, {{ net.channels }} каналов) над планами доски
+  (свои фишки, фишки соперника, плоскость единиц). Для AlphaZero-lite — две головы (политика: 7 логитов; value: tanh), для DQN — голова Q (7 значений).
+  Позиции хранятся как пара 64-битных битбордов; зеркальное отражение доски применяется как аугментация и к AZ, и к DQN.</p>
+<table>
+  <tr><th>Что</th><th>Форма / тип</th></tr>
+  {% for k, v in shapes.items() %}<tr><td>{{ k }}</td><td><code>{{ v }}</code></td></tr>{% endfor %}
+</table>
+<table>
+  <tr><th>Прогон</th><th class="num">Параметров</th><th class="num">Партий self-play</th><th class="num">Симуляций на ход</th><th class="num">Позиций</th><th class="num">Время обучения, мин</th></tr>
+  {% for r in run_rows %}<tr><td>{{ r.name }}</td><td class="num">{{ r.params }}</td><td class="num">{{ r.games }}</td><td class="num">{{ r.sims }}</td><td class="num">{{ r.positions }}</td><td class="num">{{ r.minutes }}</td></tr>{% endfor %}
+</table>
+<p class="meta">Гиперпараметры AZ: {{ az.iterations }} итераций × {{ az.games_per_iter }} партий, {{ az.train_steps }} шагов SGD (batch {{ az.batch }}) на итерацию,
+  c<sub>puct</sub> = {{ az.c_puct }}, шум Дирихле α = {{ az.dirichlet_alpha }}, ε = {{ az.dirichlet_eps }} в корне, температура 1 первые {{ az.temp_moves }} ходов, буфер {{ az.buffer }}, AdamW lr {{ az.lr }} (cosine).
+  DQN: {{ dqn.envs }} параллельных сред, γ = {{ dqn.gamma }}, ε {{ dqn.eps_start }} → {{ dqn.eps_end }}, буфер {{ dqn.buffer }}, target-сеть обновляется каждые {{ dqn.target_every }} шагов.
+  Бюджеты партий различаются (таблица выше): партия DQN дешевле партии AZ, потому что в ней нет поиска; сравнение по времени — рис. 6, правая панель.</p>
+
+<p><b>Как измеряется качество.</b> (1) <b>Точность хода</b> на позициях, размеченных солвером (раздел 2): доля ходов, не ухудшающих результат, на
+  «нетривиальных» позициях; 95% интервалы — bootstrap по позициям. (2) <b>Турнир</b> «каждый с каждым»: {{ n_players }} игроков, по {{ ev.games_per_pair }} партий в паре,
+  дебют — {{ ev.open_plies }} случайных хода, каждый дебют сыгран дважды со сменой цветов. По итогам считается рейтинг Elo (модель Брэдли—Терри, random = 0),
+  интервалы — bootstrap по партиям. Бейзлайны: random, greedy (выигрывает/блокирует за один ход), minimax (alpha-beta, глубины {{ minimax_depths }}, эвристика по «окнам»),
+  UCT ({{ uct_sims }} симуляций, случайные прогоны вместо сети) и идеальный игрок (солвер).</p>
+
+<h2>4. Результаты</h2>
+<h3>4.1. Обучение</h3>
+<figure><img src="data:image/png;base64,{{ figs.curves }}" alt="Кривые обучения">
+  <figcaption>Рис. 6. Точность <b>чистой политики</b> (AZ — argmax политики без поиска, DQN — argmax Q) по ходу обучения: по числу партий и по времени.</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.diag }}" alt="Диагностика обучения">
+  <figcaption>Рис. 7. Потери, длина партий self-play и доля ничьих/побед X. Исходы self-play отражают качество игры обеих сторон: чем ближе игра
+  к идеальной, тем ближе исходы к теоретическим (при идеальной игре первый игрок выигрывает); рывки на графике — это смена стратегии сети.</figcaption></figure>
+
+<h3>4.2. Точность ходов против идеальной игры</h3>
+<table>
+  <tr><th rowspan="2">Агент</th><th rowspan="2">Тип</th><th rowspan="2" class="num">Симуляций</th><th colspan="3">набор expert</th><th colspan="3">набор random</th></tr>
+  <tr><th class="num">точность, нетрив. %</th><th class="num">95% ДИ</th><th class="num">грубые ошибки, %</th><th class="num">точность, нетрив. %</th><th class="num">95% ДИ</th><th class="num">грубые ошибки, %</th></tr>
+  {% for r in agent_rows %}<tr><td>{{ r.name }}</td><td>{{ r.family }}</td><td class="num">{{ r.sims }}</td>
+    <td class="num">{{ r.c_expert.acc_nt }}</td><td class="num">{{ r.c_expert.ci }}</td><td class="num">{{ r.c_expert.blunder_nt }}</td>
+    <td class="num">{{ r.c_random.acc_nt }}</td><td class="num">{{ r.c_random.ci }}</td><td class="num">{{ r.c_random.blunder_nt }}</td></tr>{% endfor %}
+</table>
+<p class="meta">Наборы: expert — {{ n_sets.expert }} позиций, random — {{ n_sets.random }}. «Точность» и «грубые ошибки» дополняют друг друга до 100%:
+  ход либо сохраняет теоретический результат, либо ухудшает его (солвер в «слабом» режиме различает только исход, а не скорость победы).</p>
+<figure><img src="data:image/png;base64,{{ figs.acc }}" alt="Точность агентов">
+  <figcaption>Рис. 8. Точность на нетривиальных позициях (линия — 95% ДИ).</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.blunder }}" alt="Грубые ошибки">
+  <figcaption>Рис. 9. Доля грубых ошибок (ход, ухудшающий теоретический результат) — чем меньше, тем лучше.</figcaption></figure>
+
+<h3>4.3. Что даёт поиск</h3>
+<p>Одна и та же сеть, но разное число симуляций MCTS на ход (в том числе необученная сеть и UCT со случайными прогонами).</p>
+<figure><img src="data:image/png;base64,{{ figs.sweep }}" alt="Бюджет поиска">
+  <figcaption>Рис. 10. Точность и стоимость в зависимости от числа симуляций. Время — на позицию при батче из всех тестовых позиций сразу.</figcaption></figure>
+<table>
+  <tr><th>Сеть</th><th class="num">Симуляций</th><th class="num">expert, %</th><th class="num">random, %</th><th class="num">мс / позиция</th></tr>
+  {% for r in sweep_rows %}<tr><td>{{ r.net }}</td><td class="num">{{ r.sims }}</td><td class="num">{{ r.expert }}</td><td class="num">{{ r.random }}</td><td class="num">{{ r.ms }}</td></tr>{% endfor %}
+</table>
+
+<h3>4.4. Турнир и рейтинг Elo</h3>
+<p>{{ n_players }} игроков, всего {{ n_games_total }} партий.</p>
+<table>
+  <tr><th>Игрок</th><th>Тип</th><th class="num">Elo</th><th class="num">95% ДИ</th><th class="num">Партий</th></tr>
+  {% for r in elo_rows %}<tr><td>{{ r.name }}</td><td>{{ r.family }}</td><td class="num">{{ r.elo }}</td><td class="num">{{ r.ci }}</td><td class="num">{{ r.games }}</td></tr>{% endfor %}
+</table>
+<figure><img src="data:image/png;base64,{{ figs.elo }}" alt="Elo"><figcaption>Рис. 11. Рейтинг Elo (random = 0).</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.matrix }}" alt="Матрица результатов">
+  <figcaption>Рис. 12. Результаты каждой пары (игроки отсортированы по Elo).</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.elo_progress }}" alt="Elo по ходу обучения">
+  <figcaption>Рис. 13. Рост рейтинга AlphaZero-lite по контрольным точкам обучения (0%, 25%, 50%, 100% партий) и вклад поиска у финальной сети.</figcaption></figure>
+
+<h3>4.5. Что выучила сеть</h3>
+<p>Value-голова сравнивается с точным результатом от солвера на expert-наборе: знак оценки (порог ±1/3) совпадает с истинным результатом в
+  <b>{{ f.value_sign }}%</b> позиций, корреляция Пирсона {{ f.value_corr }}.</p>
+<figure><img src="data:image/png;base64,{{ figs.value }}" alt="Value-голова">
+  <figcaption>Рис. 14. Оценки value-головы по классам истинного результата и ошибка по стадии партии: чем ближе конец, тем точнее оценка.</figcaption></figure>
+<figure><img src="data:image/png;base64,{{ figs.traces }}" alt="Оценки вдоль партий">
+  <figcaption>Рис. 15. Оценка позиции для первого игрока вдоль сыгранных партий: value-голова (зелёная) против точного результата (чёрная ступенчатая).</figcaption></figure>
+{% if figs.examples %}<p><b>Где политика ошибается, а поиск исправляет.</b> Позиции из expert-набора, в которых чистая политика выбирает неоптимальный ход
+  (★ — оптимальные колонки по солверу).</p>
+<figure><img src="data:image/png;base64,{{ figs.examples }}" alt="Примеры позиций">
+  <figcaption>Рис. 16. Слева — позиция, справа — распределение политики (синий) и доля визитов MCTS (зелёный).</figcaption></figure>{% endif %}
+
+<h3>4.6. Партии с участием лучшего агента</h3>
+<p>Партии из турнира; можно листать ходы. X — красные, O — жёлтые.</p>
+<div id="viewer" class="card">
+  <select id="gsel"></select>
+  <button id="prev">◀</button> <button id="next">▶</button> <button id="play">▶▶ автоход</button>
+  <span id="info" class="meta"></span>
+  <svg id="board" viewBox="0 0 7.4 6.6" width="360" style="display:block;margin-top:8px"></svg>
+</div>
+<script>
+const GAMES = {{ replays|tojson }};
+const sel = document.getElementById('gsel'), svg = document.getElementById('board'), info = document.getElementById('info');
+let g = 0, k = 0, timer = null;
+GAMES.forEach((x, i) => { const o = document.createElement('option'); o.value = i; o.textContent = x.title; sel.appendChild(o); });
+function draw() {
+  const heights = Array(7).fill(0), grid = Array.from({length: 6}, () => Array(7).fill(0));
+  const mv = GAMES[g].moves;
+  for (let i = 0; i < k; i++) { const c = mv[i]; grid[heights[c]++][c] = i % 2 === 0 ? 1 : 2; }
+  let s = '<rect x="0.2" y="0.1" width="7" height="6" rx="0.2" fill="#2a78d6"/>';
+  for (let r = 0; r < 6; r++) for (let c = 0; c < 7; c++) {
+    const v = grid[r][c], fill = v === 0 ? '#fff' : v === 1 ? '#e34948' : '#eda100';
+    s += `<circle cx="${c + 0.7}" cy="${5.6 - r + 0.1}" r="0.4" fill="${fill}"/>`;
+  }
+  if (k > 0) { const c = mv[k - 1]; s += `<rect x="${c + 0.2}" y="0.1" width="1" height="6" fill="none" stroke="#0b0b0b" stroke-dasharray="0.1"/>`; }
+  for (let c = 0; c < 7; c++) s += `<text x="${c + 0.7}" y="6.45" font-size="0.35" text-anchor="middle" fill="#52514e">${c + 1}</text>`;
+  svg.innerHTML = s;
+  info.textContent = ` ход ${k} из ${mv.length}` + (k > 0 ? `, ${(k - 1) % 2 === 0 ? 'X' : 'O'} играет в колонку ${mv[k - 1] + 1}` : '');
+}
+function stop() { if (timer) { clearInterval(timer); timer = null; } }
+sel.onchange = () => { stop(); g = +sel.value; k = 0; draw(); };
+document.getElementById('prev').onclick = () => { stop(); k = Math.max(0, k - 1); draw(); };
+document.getElementById('next').onclick = () => { stop(); k = Math.min(GAMES[g].moves.length, k + 1); draw(); };
+document.getElementById('play').onclick = () => {
+  if (timer) { stop(); return; }
+  timer = setInterval(() => { if (k >= GAMES[g].moves.length) { stop(); return; } k++; draw(); }, 600);
+};
+if (GAMES.length) draw();
+</script>
+
+<h2>5. Выводы</h2>
+<div class="card good">
+<ul>
+  <li><b>Вклад поиска.</b> Чистая политика AlphaZero-lite: {{ f.az_raw }}% на нетривиальных expert-позициях; та же сеть с
+    100 симуляциями MCTS — {{ f.az_mcts }}% ({{ f.search_gain }} п.п.{% if f.search_significant %}, интервалы не пересекаются{% else %}, интервалы пересекаются — разница не доказана{% endif %}).
+    Elo: {{ f.e_az_raw }} без поиска → {{ f.e_az_m }} с поиском. Необученная сеть с поиском достигает до {{ f.init_search_best }}% при
+    {{ f.init_acc }}% у необученной политики без поиска; обученная сеть с поиском — до {{ f.final_search_best }}% (рис. 10).</li>
+  <li><b>AlphaZero-lite против DQN</b> ({{ f.az_games }} партий у AZ против {{ f.dqn_games }} у DQN): точность чистой политики {{ f.az_raw }}% против {{ f.dqn_acc }}% ({{ f.az_vs_dqn }} п.п.), Elo {{ f.e_az_raw }} против {{ f.e_dqn }}.
+    {% if f.az_beats_dqn_elo %}Различие в Elo значимо (интервалы не пересекаются): AZ сильнее.{% elif f.dqn_beats_az_elo %}Различие в Elo значимо в пользу DQN.{% else %}Интервалы Elo пересекаются — на этом бюджете различие не доказано.{% endif %}
+    Учтите, что стоимость партии разная (рис. 6, правая панель по времени и таблица прогонов): AZ тратит симуляции на каждый ход.</li>
+  <li><b>Против классики.</b> Лучший minimax ({{ f.mm_name }}): Elo {{ f.e_mm }}; AlphaZero-lite + MCTS100: Elo {{ f.e_az_m }}.
+    {% if f.az_m_beats_mm %}AZ значимо сильнее.{% elif f.mm_beats_az_m %}Minimax значимо сильнее — сети на этом бюджете не хватило.{% else %}Интервалы пересекаются — различие не доказано.{% endif %}
+    Идеальный игрок: Elo {{ f.e_perfect }} (отрыв от AZ + MCTS100: {{ f.perfect_gap }}){% if f.perfect_overlap %}; интервалы Elo пересекаются, то есть по результатам партий турнира (с двумя случайными ходами дебюта и многими ничьими) отличить этого агента от идеального игрока не удалось, а вот точность по позициям ({{ f.az_mcts }}% против {{ f.perfect_acc }}%) различие видит{% endif %}. Точность идеального игрока на размеченных позициях {{ f.perfect_acc }}% — проверка корректности разметки и метрики.</li>
+  <li><b>Абляция: слабее поиск при self-play</b> ({{ az_lite.sims }} вместо {{ az.sims }} симуляций, то же число партий): Elo чистой политики {{ f.e_lite }} против {{ f.e_az_raw }} ({{ f.lite_vs_az }});
+    {% if f.lite_sig_worse %}значимо хуже — качество целей для политики зависит от глубины поиска.{% elif f.lite_sig_better %}значимо лучше.{% else %}интервалы Elo пересекаются — различие не доказано.{% endif %}</li>
+  <li><b>Value-голова</b> верно называет результат в {{ f.value_sign }}% позиций expert-набора; как ошибка зависит от стадии партии — рис. 14.</li>
+</ul>
+</div>
+<h3>Ограничения (честно)</h3>
+<ul>
+  <li>Один seed на каждый прогон: интервалы отражают конечность тестовых позиций и партий, но <b>не разброс между запусками обучения</b>.
+    Различия между близкими агентами нужно подтверждать несколькими seed.</li>
+  <li>«Одинаковое число партий» не равно «одинаковым вычислениям»: AZ делает ~{{ az.sims }} оценок сети на ход, DQN — одну. Сравнение по времени см. рис. 6.</li>
+  <li>Метрика «точность хода» использует слабый режим солвера: он различает выигрыш/ничью/проигрыш, но не скорость победы — быстрый и медленный
+    выигрыш считаются одинаково хорошими.</li>
+  <li>Параметры самоигры (шум Дирихле, температура, c<sub>puct</sub>) взяты из литературы и не подбирались; сети небольшие
+    ({{ net.blocks }} блоков × {{ net.channels }} каналов) — под бюджет одной видеокарты на 8 ГБ.</li>
+  <li>Тестовые позиции взяты из случайной и «почти идеальной» игры, а не из партий самих обучаемых агентов: так оценка не зависит от того, куда
+    агенты склонны попадать.</li>
+</ul>
+
+<h2>6. Воспроизводимость</h2>
+<p>Запуск: <code>docker compose run --rm lab</code> (всё скачивается и строится внутри контейнера: солвер собирается из исходников при сборке образа,
+  дебютная книга солвера — при первом запуске). Этапы и время, мин: {% for k, v in timings.items() %}{{ k }} — {{ v }}{% if not loop.last %}; {% endif %}{% endfor %}.
+  Все числа этого отчёта берутся из <code>outputs/results.pkl</code> текущего запуска; <code>python -m c4rl report</code> пересобирает отчёт без обучения.
+  Рисунки лежат в <code>outputs/figures/</code>, метрики — в <code>outputs/metrics.json</code>, веса — в <code>outputs/checkpoints/</code>
+  (сыграть с агентом: <code>docker compose run --rm play</code>).</p>
+{% endblock %}

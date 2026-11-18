@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect-4: сыграть с ботом</title>
+<style>
+  :root { --ink:#0b0b0b; --muted:#52514e; --line:#e6e5e1; --bg:#fcfcfb; --card:#f4f3ef; --acc:#1baf7a;
+          --x:#e34948; --o:#eda100; --blue:#2a78d6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#f1f0ec; --muted:#a9a8a2; --line:#34332f; --bg:#171716; --card:#22221f; }
+  }
+  * { box-sizing: border-box; }
+  body { font:16px/1.5 -apple-system,"Segoe UI",Roboto,"DejaVu Sans",sans-serif; color:var(--ink); background:var(--bg);
+         margin:0; padding:20px 16px 48px; }
+  main { max-width:1040px; margin:0 auto; display:grid; grid-template-columns:minmax(300px,520px) 1fr; gap:24px; }
+  @media (max-width: 820px) { main { grid-template-columns:1fr; } }
+  h1 { font-size:1.5rem; margin:0 0 4px; grid-column:1/-1; }
+  .sub { color:var(--muted); font-size:.9rem; grid-column:1/-1; margin:0 0 4px; }
+  .card { background:var(--card); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  label { display:block; font-size:.88rem; color:var(--muted); margin:10px 0 3px; }
+  select, input[type=range] { width:100%; }
+  select { padding:6px; font-size:1rem; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:6px; }
+  .row { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  button { font:inherit; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:var(--bg);
+           color:var(--ink); cursor:pointer; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { font-size:1.1rem; font-weight:600; min-height:1.7em; margin-bottom:6px; }
+  #board { width:100%; max-width:520px; display:block; touch-action:manipulation; }
+  .col { cursor:pointer; } .col:hover .hl { opacity:.18; }
+  .hl { opacity:0; fill:var(--ink); transition:opacity .1s; }
+  .muted { color:var(--muted); font-size:.88rem; }
+  .ok { color:var(--acc); font-weight:600; } .bad { color:var(--x); font-weight:600; }
+  #moves { font-variant-numeric:tabular-nums; word-break:break-word; }
+  .elo { color:var(--muted); font-size:.82rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connect-4: сыграйте с ботом</h1>
+  <p class="sub">Нейросети из лабораторной работы (AlphaZero-lite, DQN) и классические боты. Красные (X) ходят первыми.</p>
+
+  <section>
+    <div id="status">Загрузка…</div>
+    <svg id="board" viewBox="0 0 7.4 8.0" role="img" aria-label="Игровое поле"></svg>
+    <div class="muted" id="hintline"></div>
+    <div class="card" id="judge" style="display:none"></div>
+  </section>
+
+  <section>
+    <div class="card">
+      <label for="opp">Соперник</label>
+      <select id="opp"></select>
+      <div class="elo" id="oppinfo"></div>
+      <div id="simsbox">
+        <label for="sims">Поиск MCTS: <b id="simslabel"></b></label>
+        <input type="range" id="sims" min="0" max="6" step="1" value="3">
+        <div class="muted">0 симуляций — чистая политика сети; больше симуляций — сильнее и медленнее.</div>
+      </div>
+      <label>Ваша сторона</label>
+      <div class="row">
+        <label style="margin:0"><input type="radio" name="side" value="X" checked> X, ходите первым</label>
+        <label style="margin:0"><input type="radio" name="side" value="O"> O, ходите вторым</label>
+      </div>
+      <label style="margin-top:12px"><input type="checkbox" id="hints"> показывать «мысли» бота (политика, визиты MCTS, оценка позиции)</label>
+      <label style="margin:4px 0 0"><input type="checkbox" id="judge-on"> оценивать мои ходы идеальным солвером</label>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="new">Новая партия</button>
+        <button id="undo">Отменить ход</button>
+      </div>
+    </div>
+    <div class="card">
+      <b>Ходы</b>
+      <div id="moves" class="muted">—</div>
+    </div>
+    <div class="card muted">
+      Подсказки: синие столбики над колонками — политика сети, зелёные — доля визитов MCTS, оценка — от лица бота
+      (+1 — бот выигрывает, −1 — проигрывает). Вердикты солвера появляются после каждого вашего хода; в первый раз
+      солверу нужно скачать дебютную книгу (32 МБ) — первый ход может занять пару минут.
+    </div>
+  </section>
+</main>
+
+<script>
+const SIMS = [0, 10, 25, 50, 100, 200, 400];
+const $ = (id) => document.getElementById(id);
+const svg = $('board');
+let moves = [], status = 'playing', busy = false, humanX = true, lastHints = null, lastMove = null, line = null;
+let opponents = [];
+
+function humanTurn() { return status === 'playing' && ((moves.length % 2 === 0) === humanX); }
+
+function grid() {
+  const h = Array(7).fill(0), g = Array.from({length: 6}, () => Array(7).fill(0));
+  moves.forEach((c, i) => { g[h[c]++][c] = i % 2 === 0 ? 1 : 2; });
+  return {g, h};
+}
+
+function findLine(g) {
+  for (let r = 0; r < 6; r++) for (let c = 0; c < 7; c++) {
+    const v = g[r][c]; if (!v) continue;
+    for (const [dr, dc] of [[0, 1], [1, 0], [1, 1], [1, -1]]) {
+      const cells = [0, 1, 2, 3].map(k => [r + k * dr, c + k * dc]);
+      if (cells.every(([y, x]) => y >= 0 && y < 6 && x >= 0 && x < 7 && g[y][x] === v)) return cells;
+    }
+  }
+  return null;
+}
+
+function draw() {
+  const {g, h} = grid();
+  line = (status === 'x' || status === 'o') ? findLine(g) : null;
+  const top = $('hints').checked ? 1.5 : 0.2;   // room for the hint bars only when they are shown
+  svg.setAttribute('viewBox', `0 0 7.4 ${top + 6.6}`);
+  let s = `<rect x="0.2" y="${top}" width="7" height="6" rx="0.2" fill="#2a78d6"/>`;
+  for (let r = 0; r < 6; r++) for (let c = 0; c < 7; c++) {
+    const v = g[r][c], fill = v === 0 ? '#fff' : v === 1 ? 'var(--x)' : 'var(--o)';
+    const cy = top + 5.5 - r + 0.0;
+    s += `<circle cx="${c + 0.7}" cy="${cy}" r="0.4" fill="${fill}"/>`;
+  }
+  if (line) line.forEach(([r, c]) => { s += `<circle cx="${c + 0.7}" cy="${top + 5.5 - r}" r="0.46" fill="none" stroke="#fff" stroke-width="0.09"/>`; });
+  if (lastMove !== null && h[lastMove] > 0) s += `<circle cx="${lastMove + 0.7}" cy="${top + 5.5 - (h[lastMove] - 1)}" r="0.14" fill="#0b0b0b" fill-opacity=".55"/>`;
+  if ($('hints').checked && lastHints) {
+    const bars = (arr, dx, color) => (arr || []).forEach((p, c) => {
+      if (p === null || p <= 0) return;
+      const hgt = Math.max(0.02, Math.min(1, p)) * 1.2;
+      s += `<rect x="${c + 0.7 + dx}" y="${top - 0.1 - hgt}" width="0.28" height="${hgt}" fill="${color}"/>`;
+    });
+    bars(lastHints.policy, -0.3, '#2a78d6'); bars(lastHints.visits, 0.02, '#1baf7a');
+  }
+  for (let c = 0; c < 7; c++) {
+    s += `<text x="${c + 0.7}" y="${top + 6.45}" font-size="0.36" text-anchor="middle" fill="var(--muted)">${c + 1}</text>`;
+    s += `<g class="col" data-c="${c}"><rect class="hl" x="${c + 0.2}" y="${top}" width="1" height="6.1"/>` +
+         `<rect x="${c + 0.2}" y="0" width="1" height="${top + 6.6}" fill="transparent"/></g>`;
+  }
+  svg.innerHTML = s;
+  svg.querySelectorAll('.col').forEach(el => el.addEventListener('click', () => onColumn(+el.dataset.c)));
+  $('moves').textContent = moves.length ? moves.map((c, i) => `${i + 1}. ${i % 2 === 0 ? 'X' : 'O'}${c + 1}`).join('  ') : '—';
+  let msg;
+  if (status === 'x' || status === 'o') msg = ((status === 'x') === humanX) ? 'Вы выиграли! 🎉' : 'Бот выиграл';
+  else if (status === 'draw') msg = 'Ничья';
+  else if (busy) msg = 'Бот думает…';
+  else msg = humanTurn() ? 'Ваш ход' : '…';
+  $('status').textContent = msg;
+  $('undo').disabled = busy || moves.length === 0;
+  const v = lastHints && lastHints.value;
+  $('hintline').textContent = ($('hints').checked && lastHints && typeof v === 'number')
+    ? `Оценка позиции ботом (до его хода): ${v >= 0 ? '+' : ''}${v.toFixed(2)}` : '';
+}
+
+async function api(body) {
+  const r = await fetch('/api/move', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+function showJudge(j, err, col) {
+  const el = $('judge');
+  if (err) { el.style.display = 'block'; el.innerHTML = `<span class="muted">Солвер недоступен: ${err}</span>`; return; }
+  if (!j) return;
+  el.style.display = 'block';
+  const best = j.best_columns.map(c => c + 1).join(', ');
+  el.innerHTML = j.optimal
+    ? `<span class="ok">✔ Ход ${col + 1} оптимален.</span> <span class="muted">Позиция для вас: ${j.position}.</span>`
+    : `<span class="bad">✘ Ход ${col + 1} ухудшил результат:</span> было «${j.position}», стало «${j.after_move}». ` +
+      `<span class="muted">Сохраняли результат колонки: ${best}.</span>`;
+}
+
+async function turn(judge) {
+  busy = true; draw();
+  try {
+    const res = await api({moves, opponent: $('opp').value, sims: SIMS[+$('sims').value], hints: $('hints').checked, judge});
+    if (judge) showJudge(res.judge, res.judge_error, moves[moves.length - 1]);
+    if (res.move !== null) { moves.push(res.move); lastMove = res.move; }
+    lastHints = res.hints && Object.keys(res.hints).length ? res.hints : null;
+    status = res.status;
+  } catch (e) { $('status').textContent = 'Ошибка: ' + e.message; moves.pop(); }
+  busy = false; draw();
+}
+
+async function onColumn(c) {
+  if (busy || !humanTurn()) return;
+  const {h} = grid();
+  if (h[c] >= 6) return;
+  moves.push(c); lastMove = c; lastHints = null;
+  // let the server tell whether the game ended with this move; it answers with the bot's reply otherwise
+  await turn($('judge-on').checked);
+}
+
+function newGame() {
+  moves = []; status = 'playing'; lastHints = null; lastMove = null; $('judge').style.display = 'none';
+  humanX = document.querySelector('input[name=side]:checked').value === 'X';
+  draw();
+  if (!humanX) turn(false);
+}
+
+function undo() {
+  if (busy) return;
+  const minLen = humanX ? 0 : 1;           // when the bot moves first its opening move stays
+  if (moves.length <= minLen) return;
+  moves.pop();
+  while (moves.length > minLen && (moves.length % 2 === 0) !== humanX) moves.pop();   // back to the human's turn
+  status = 'playing'; lastHints = null; lastMove = null;
+  $('judge').style.display = 'none'; draw();
+}
+
+function describe() {
+  const o = opponents.find(x => x.id === $('opp').value);
+  $('simsbox').style.display = o && o.searchable ? 'block' : 'none';
+  $('simslabel').textContent = SIMS[+$('sims').value] + ' симуляций';
+  const parts = [];
+  if (o && o.elo != null) parts.push(`Elo без поиска ≈ ${o.elo}`);
+  if (o && o.elo_search != null) parts.push(`с 100 симуляциями ≈ ${o.elo_search}`);
+  $('oppinfo').textContent = parts.length ? parts.join(' · ') + ' (random = 0, турнир из отчёта)' : '';
+}
+
+async function init() {
+  opponents = await (await fetch('/api/opponents')).json();
+  const groups = {};
+  opponents.forEach(o => { (groups[o.group] = groups[o.group] || []).push(o); });
+  for (const [name, list] of Object.entries(groups)) {
+    const g = document.createElement('optgroup'); g.label = name;
+    list.forEach(o => { const e = document.createElement('option'); e.value = o.id; e.textContent = o.label; g.appendChild(e); });
+    $('opp').appendChild(g);
+  }
+  const prefer = opponents.find(o => o.id === 'az_final') || opponents[0];
+  if (prefer) $('opp').value = prefer.id;
+  $('opp').onchange = () => { describe(); newGame(); };
+  $('sims').oninput = describe;
+  $('hints').onchange = draw;
+  $('new').onclick = newGame; $('undo').onclick = undo;
+  document.querySelectorAll('input[name=side]').forEach(e => e.onchange = newGame);
+  describe(); newGame();
+}
+init().catch(e => { $('status').textContent = 'Не удалось загрузить список соперников: ' + e.message; });
+</script>
+</body>
+</html>
