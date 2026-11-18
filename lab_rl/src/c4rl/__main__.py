@@ -23,7 +23,7 @@ from .evaluation import make_position_sets
 from .experiment import Results, run_experiment
 from .models import discover, export_weights
 from .report import build_eda, build_report
-from .serve import Engine, play_terminal, serve
+from .serve import Engine, Limits, play_terminal, serve
 from .solver import Solver
 
 
@@ -31,7 +31,12 @@ def _engine(args: argparse.Namespace) -> Engine:
     registry = discover(args.weights, args.out / "checkpoints")
     if not registry:
         print("no trained networks found (weights/ and outputs/checkpoints are empty): only classic bots are available")
-    return Engine(registry, torch.device(args.device), args.cache)
+    limits = Limits(
+        public=getattr(args, "public", False),
+        trust_proxy=getattr(args, "trust_proxy", False),
+        solver_slots=getattr(args, "solver_slots", 0),
+    )
+    return Engine(registry, torch.device(args.device), args.cache, limits)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -55,6 +60,18 @@ def main(argv: list[str] | None = None) -> None:
         if name == "serve":
             p.add_argument("--host", default="127.0.0.1")
             p.add_argument("--port", type=int, default=8000)
+            p.add_argument(
+                "--public",
+                action="store_true",
+                help="internet-facing mode: strict limits, solver only via --solver-slots",
+            )
+            p.add_argument("--trust-proxy", action="store_true", help="read the client address from X-Forwarded-For")
+            p.add_argument(
+                "--solver-slots",
+                type=int,
+                default=0,
+                help="with --public: allow the perfect solver for at most N simultaneous queries (0 = off)",
+            )
         if name == "play":
             p.add_argument(
                 "--opponent", default="az_final", help="a model id (see the web list), minimax-4, perfect, ..."

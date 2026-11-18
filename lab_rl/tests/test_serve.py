@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -15,8 +16,8 @@ import torch
 from c4rl.config import NetConfig
 from c4rl.models import discover, export_weights, infer_architecture
 from c4rl.net import PVNet, QNet, save_checkpoint
-from c4rl.serve import Engine, GameError, make_server, replay
-from c4rl.solver import solver_available
+from c4rl.serve import Busy, Engine, GameError, Limits, make_server, replay
+from c4rl.solver import Solver, solver_available
 
 
 @pytest.fixture
@@ -139,3 +140,141 @@ def test_judge_flags_a_blunder_and_accepts_the_best_move(tmp_path: Path) -> None
         assert 0 <= perfect["move"] <= 6
     finally:
         eng.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# internet-facing mode: limits and no solver
+# ---------------------------------------------------------------------------------------------
+def _serve(engine: Engine) -> tuple[Any, str]:
+    server = make_server(engine, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _post(base: str, body: Any, raw: bytes | None = None, headers: dict[str, str] | None = None) -> tuple[int, Any]:
+    data = raw if raw is not None else json.dumps(body).encode()
+    req = urllib.request.Request(base + "/api/move", data, {"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def _public_engine(ckpt_dir: Path, tmp_path: Path, **kw: Any) -> Engine:
+    return Engine(
+        discover(tmp_path / "none", ckpt_dir), torch.device("cpu"), tmp_path / "cache", Limits(public=True, **kw)
+    )
+
+
+def test_public_mode_hides_the_solver(ckpt_dir: Path, tmp_path: Path) -> None:
+    eng = _public_engine(ckpt_dir, tmp_path)
+    assert "perfect" not in {o["id"] for o in eng.opponents()}
+    assert eng.info() == {"public": True, "max_sims": 400, "solver": False, "solver_slots": 0}
+    with pytest.raises(GameError):
+        eng.respond({"moves": [3], "opponent": "perfect"})
+    with pytest.raises(GameError):
+        eng.respond({"moves": [3], "opponent": "random", "judge": True})
+
+
+@needs_solver
+def test_public_solver_is_limited_to_the_configured_slots(ckpt_dir: Path, tmp_path: Path) -> None:
+    cache = Path("cache") if Path("cache").is_dir() else tmp_path / "cache"
+    eng = Engine(discover(tmp_path / "none", ckpt_dir), torch.device("cpu"), cache, Limits(public=True, solver_slots=2))
+    try:
+        assert eng.info()["solver"] is True and eng.info()["solver_slots"] == 2
+        assert "perfect" in {o["id"] for o in eng.opponents()}
+        with pytest.raises(Busy):  # not started yet: nobody waits for the book download
+            eng.respond({"moves": [3, 3], "opponent": "perfect"})
+        eng.warm_up()
+        deadline = time.monotonic() + 900
+        while eng._solver is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+        solver = eng._solver
+        assert solver is not None
+        solver._cache.clear()  # cache hits do not need a slot; force real queries
+        held = [solver._acquire(), solver._acquire()]  # both slots taken by "other players"
+        try:
+            out = eng.respond({"moves": [3, 3], "opponent": "random", "judge": True})
+            assert "busy" in out["judge_error"] and out["move"] is not None  # the game itself keeps going
+            with pytest.raises(Busy):
+                eng.respond({"moves": [3, 3], "opponent": "perfect"})
+        finally:
+            for proc in held:
+                solver._release(proc)
+        assert eng.respond({"moves": [3], "opponent": "random", "judge": True})["judge"]["optimal"] is True
+        assert eng.respond({"moves": [3, 3], "opponent": "perfect"})["move"] is not None
+    finally:
+        eng.close()
+
+
+@needs_solver
+def test_solver_pool_answers_agree_under_concurrency(tmp_path: Path) -> None:
+    cache = Path("cache") if Path("cache").is_dir() else tmp_path
+    histories = ["", "4", "44", "45", "443", "4453", "3", "34"]
+    with Solver(cache, workers=1) as one:
+        expected = {h: one.analyze(h) for h in histories}
+    with Solver(cache, workers=3, wait=60.0) as pool:
+        pool._cache.clear()
+        got: dict[str, list[int]] = {}
+        threads = [threading.Thread(target=lambda h=h: got.__setitem__(h, pool.analyze(h))) for h in histories]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert got == expected
+
+
+def test_sims_are_capped(engine: Engine) -> None:
+    for bad in (-1, 401, 10**9):
+        with pytest.raises(GameError):
+            engine.respond({"moves": [3], "opponent": "az_final", "sims": bad})
+    assert engine.respond({"moves": [3], "opponent": "az_final", "sims": 2})["move"] is not None
+
+
+def test_http_rejects_oversized_malformed_and_unknown(ckpt_dir: Path, tmp_path: Path) -> None:
+    server, base = _serve(_public_engine(ckpt_dir, tmp_path))
+    try:
+        assert _post(base, None, raw=b"x" * 5000)[0] == 413
+        assert _post(base, None, raw=b"not json")[0] == 400
+        assert _post(base, None, raw=b'["a list"]')[0] == 400
+        assert _post(base, {"moves": "3", "opponent": "random"})[0] == 400
+        assert _post(base, {"moves": [3], "opponent": "random", "sims": 10**9})[0] == 400
+        assert urllib.request.urlopen(base + "/healthz").read() == b"ok"
+        headers = urllib.request.urlopen(base + "/").headers
+        assert headers["X-Content-Type-Options"] == "nosniff" and "default-src" in headers["Content-Security-Policy"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_rate_limit_and_busy(ckpt_dir: Path, tmp_path: Path) -> None:
+    server, base = _serve(_public_engine(ckpt_dir, tmp_path, rate_per_min=3))
+    try:
+        codes = [_post(base, {"moves": [], "opponent": "random"})[0] for _ in range(5)]
+        assert codes[:3] == [200, 200, 200] and codes[3:] == [429, 429]
+    finally:
+        server.shutdown()
+        server.server_close()
+    busy = _public_engine(ckpt_dir, tmp_path, max_inflight=0)
+    server, base = _serve(busy)
+    try:
+        code, body = _post(base, {"moves": [], "opponent": "random"})
+        assert code == 503 and "busy" in body["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_rate_limit_uses_forwarded_address_only_behind_a_trusted_proxy(ckpt_dir: Path, tmp_path: Path) -> None:
+    eng = _public_engine(ckpt_dir, tmp_path, rate_per_min=2, trust_proxy=True)
+    server, base = _serve(eng)
+    try:
+        a = {"X-Forwarded-For": "203.0.113.1"}
+        b = {"X-Forwarded-For": "203.0.113.2"}
+        body = {"moves": [], "opponent": "random"}
+        assert [_post(base, body, headers=a)[0] for _ in range(3)] == [200, 200, 429]
+        assert _post(base, body, headers=b)[0] == 200  # another client is not affected
+    finally:
+        server.shutdown()
+        server.server_close()

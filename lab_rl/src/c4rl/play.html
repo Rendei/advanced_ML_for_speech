@@ -64,7 +64,7 @@
         <label style="margin:0"><input type="radio" name="side" value="O"> O, ходите вторым</label>
       </div>
       <label style="margin-top:12px"><input type="checkbox" id="hints"> показывать «мысли» бота (политика, визиты MCTS, оценка позиции)</label>
-      <label style="margin:4px 0 0"><input type="checkbox" id="judge-on"> оценивать мои ходы идеальным солвером</label>
+      <label style="margin:4px 0 0" id="judge-label"><input type="checkbox" id="judge-on"> оценивать мои ходы идеальным солвером</label>
       <div class="row" style="margin-top:14px">
         <button class="primary" id="new">Новая партия</button>
         <button id="undo">Отменить ход</button>
@@ -76,8 +76,9 @@
     </div>
     <div class="card muted">
       Подсказки: синие столбики над колонками — политика сети, зелёные — доля визитов MCTS, оценка — от лица бота
-      (+1 — бот выигрывает, −1 — проигрывает). Вердикты солвера появляются после каждого вашего хода; в первый раз
-      солверу нужно скачать дебютную книгу (32 МБ) — первый ход может занять пару минут.
+      (+1 — бот выигрывает, −1 — проигрывает).
+      <span id="solvernote">Вердикты солвера появляются после каждого вашего хода; в первый раз
+      солверу нужно скачать дебютную книгу (32 МБ) — первый ход может занять пару минут.</span>
     </div>
   </section>
 </main>
@@ -217,6 +218,13 @@ function describe() {
 }
 
 async function init() {
+  const info = await (await fetch('/api/info')).json();
+  if (!info.solver) {                      // internet-facing server without the solver
+    $('judge-label').style.display = 'none'; $('solvernote').style.display = 'none';
+  } else if (info.public) {                // public server: the solver serves a few players at a time
+    $('solvernote').textContent = `Идеальный солвер считает не более ${info.solver_slots} запросов одновременно: ` +
+      'если все места заняты, подождите пару секунд и повторите ход.';
+  }
   opponents = await (await fetch('/api/opponents')).json();
   const groups = {};
   opponents.forEach(o => { (groups[o.group] = groups[o.group] || []).push(o); });

@@ -1,0 +1,61 @@
+# Internet-facing deployment: the game server (CPU, public mode: strict limits, solver for <= 3 at a time) behind Caddy,
+# which terminates HTTPS with an automatic Let's Encrypt certificate for the domain in deploy/Caddyfile.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Needs ports 80 and 443 free on the host and a DNS A record pointing at it. See deploy/README.md.
+
+name: c4rl-prod
+
+services:
+  play:
+    build:
+      context: .
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu   # no GPU on the server: a ~1 GB image instead of ~8 GB
+    image: c4rl:prod
+    # The perfect solver is on for at most 3 simultaneous queries (--solver-slots 0 switches it off again).
+    command: python -m c4rl serve --host 0.0.0.0 --port 8000 --public --trust-proxy --solver-slots 3
+    restart: unless-stopped
+    environment:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - solver_cache:/app/cache   # opening book (32 MB, downloaded once) and the cache of solved positions
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m   # game ~250 MB + 3 solver processes
+    cpus: 1.0
+    pids_limit: 256
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      play:
+        condition: service_healthy
+
+volumes:
+  solver_cache:
+  caddy_data:
+  caddy_config:

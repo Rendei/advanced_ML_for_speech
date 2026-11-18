@@ -1,0 +1,9 @@
+# Caddy obtains and renews the Let's Encrypt certificate by itself (needs ports 80/443 and the DNS record).
+rendei-cool.ru {
+	encode zstd gzip
+	reverse_proxy play:8000
+}
+
+www.rendei-cool.ru {
+	redir https://rendei-cool.ru{uri} permanent
+}
