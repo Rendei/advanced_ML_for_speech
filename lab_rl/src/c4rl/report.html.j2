@@ -127,7 +127,7 @@ function draw() {
     const v = grid[r][c], fill = v === 0 ? '#fff' : v === 1 ? '#e34948' : '#eda100';
     s += `<circle cx="${c + 0.7}" cy="${5.6 - r + 0.1}" r="0.4" fill="${fill}"/>`;
   }
-  if (k > 0) { const c = mv[k - 1]; s += `<rect x="${c + 0.2}" y="0.1" width="1" height="6" fill="none" stroke="#0b0b0b" stroke-dasharray="0.1"/>`; }
+  if (k > 0) { const c = mv[k - 1]; s += `<rect x="${c + 0.2}" y="0.1" width="1" height="6" fill="none" stroke="#0b0b0b" stroke-width="0.05" stroke-dasharray="0.12 0.08"/>`; }
   for (let c = 0; c < 7; c++) s += `<text x="${c + 0.7}" y="6.45" font-size="0.35" text-anchor="middle" fill="#52514e">${c + 1}</text>`;
   svg.innerHTML = s;
   info.textContent = ` ход ${k} из ${mv.length}` + (k > 0 ? `, ${(k - 1) % 2 === 0 ? 'X' : 'O'} играет в колонку ${mv[k - 1] + 1}` : '');

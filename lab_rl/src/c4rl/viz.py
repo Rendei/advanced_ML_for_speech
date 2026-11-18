@@ -231,15 +231,15 @@ def pipeline_diagram() -> Figure:
     ]
     for x, y, t, c in boxes:
         ax.add_patch(FancyBboxPatch((x, y), 2.0, 1.0, boxstyle="round,pad=0.05", fc=c, ec="none", alpha=0.35))
-        ax.text(x + 1.0, y + 0.5, t, ha="center", va="center", fontsize=9)
+        ax.text(x + 1.0, y + 0.5, t, ha="center", va="center", fontsize=8.5)
     for x0, x1, y in ((2.15, 2.65, 2.4), (4.75, 5.25, 2.4), (7.35, 7.85, 2.4)):
         ax.add_patch(FancyArrowPatch((x0, y), (x1, y), arrowstyle="-|>", mutation_scale=14, color=MUTED))
     ax.add_patch(
         FancyArrowPatch(
-            (8.9, 1.85), (1.1, 1.85), arrowstyle="-|>", mutation_scale=14, color=MUTED, connectionstyle="arc3,rad=0.35"
+            (8.9, 1.85), (1.1, 1.85), arrowstyle="-|>", mutation_scale=14, color=MUTED, connectionstyle="arc3,rad=-0.22"
         )
     )
-    ax.text(5.0, 0.55, "новые веса сети → следующая итерация self-play", ha="center", color=MUTED, fontsize=9)
+    ax.text(5.0, 0.3, "новые веса сети → следующая итерация self-play", ha="center", color=MUTED, fontsize=9)
     ax.text(5.0, 3.15, "Цикл AlphaZero-lite", ha="center", fontsize=11, fontweight="bold")
     return fig
 
